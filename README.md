@@ -58,15 +58,6 @@ Edit `config/config.json` to adjust behavior:
 - Check file permissions
 - Enable debug mode to see config search paths
 
-## File Structure
-AIOPriceRandomizer/
-├── src/
-│   ├── mod.js                          # Main mod entry point
-│   └── aio-price-randomizer-loader.js  # Config loader
-├── config/
-│   └── config.json                     # User configuration
-└── package.json                        # Mod metadata
-
 ## Credits
 
 Built to complement **BlueHead's AIO Trader** by bluehead:
