@@ -59,3 +59,19 @@ Edit `config/config.json` to adjust behavior:
 - Enable debug mode to see config search paths
 
 ## File Structure
+AIOPriceRandomizer/
+├── src/
+│   ├── mod.js                          # Main mod entry point
+│   └── aio-price-randomizer-loader.js  # Config loader
+├── config/
+│   └── config.json                     # User configuration
+└── package.json                        # Mod metadata
+
+## Credits
+
+Built to complement **BlueHead's AIO Trader** by bluehead:
+https://forge.sp-tarkov.com/mod/374/blueheads-aio-trader
+
+## License
+
+MIT License - Feel free to modify and redistribute
