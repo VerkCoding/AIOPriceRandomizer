@@ -12,10 +12,8 @@ Features: seeded RNG, config defaults + overrides, currency conversion (RUB/USD/
 
 ## Installation
 
-1. Put the folder `AIOPriceRandomizer` into `user/mods/`.
-2. Ensure `package.json` `main` points to `src/mod.js` (done).
-3. Edit `config/config.json` as needed (use `config.example.json` as guide).
-4. Start your SPT/FIKA server.
+1) Extract this mod into your Root SPT folder aka ./[YourSPT]
+2) Make sure AIOPriceRandomizer folder inside [YourSPT]/user/mods/
 
 ## Dependencies
 
