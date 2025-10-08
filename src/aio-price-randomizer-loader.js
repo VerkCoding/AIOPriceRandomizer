@@ -1,71 +1,68 @@
 "use strict";
-/**
- * config-loader.js - AIOPriceRandomizerLoader
- * - Searches upward for defaults (near mod root) and user config (config/config.json or config.json).
- * - Merges defaults <- user config
- * - Validates and normalizes values
- * - Returns { config, tried }
- */
 
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 
-/* logger normalizer reused here to avoid TypeErrors */
-function normalizeLoggerInterface(rawLoggerInput) {
-  if (!rawLoggerInput) return console;
-  if (typeof rawLoggerInput === "function") {
-    return {
-      info: (...argumentsList) => { try { rawLoggerInput(...argumentsList); } catch { console.info(...argumentsList); } },
-      warn: (...argumentsList) => { try { rawLoggerInput(...argumentsList); } catch { console.warn(...argumentsList); } },
-      error: (...argumentsList) => { try { rawLoggerInput(...argumentsList); } catch { console.error(...argumentsList); } },
-      debug: (...argumentsList) => { try { rawLoggerInput(...argumentsList); } catch { console.debug(...argumentsList); } }
-    };
-  }
-  const findAvailableMethod = (...methodNames) => methodNames.find(methodName => typeof rawLoggerInput[methodName] === "function") || null;
-  const availableInfoMethod = findAvailableMethod("info", "log", "trace", "write");
-  const availableWarnMethod = findAvailableMethod("warn", "warning", "log", "info");
-  const availableErrorMethod = findAvailableMethod("error", "err", "log");
-  const availableDebugMethod = findAvailableMethod("debug", "info", "log");
-  return {
-    info: (...argumentsList) => { if (availableInfoMethod) return rawLoggerInput[availableInfoMethod](...argumentsList); return console.info(...argumentsList); },
-    warn: (...argumentsList) => { if (availableWarnMethod) return rawLoggerInput[availableWarnMethod](...argumentsList); return console.warn(...argumentsList); },
-    error: (...argumentsList) => { if (availableErrorMethod) return rawLoggerInput[availableErrorMethod](...argumentsList); return console.error(...argumentsList); },
-    debug: (...argumentsList) => { if (availableDebugMethod) return rawLoggerInput[availableDebugMethod](...argumentsList); return console.debug(...argumentsList); }
-  };
-}
+/**
+ * Search upward through directory tree for config files
+ */
+function findConfigFile(startDir, filenames, maxDepth = 6) {
+  let currentDir = startDir || process.cwd();
+  const tried = [];
 
-/* Search upward from startDir for candidate file names */
-function searchDirectoryTreeUpward(startingDirectory, candidateFilenames = [], maximumLevelsToSearch = 6) {
-  let currentDirectory = startingDirectory || process.cwd();
-  const attemptedPaths = [];
-  // Walk up directory tree to find config files for flexible mod installation paths
-  for (let levelIndex = 0; levelIndex <= maximumLevelsToSearch; levelIndex++) {
-    for (const candidateFilename of candidateFilenames) {
-      const candidateFilePath = path.join(currentDirectory, candidateFilename);
-      attemptedPaths.push(candidateFilePath);
-      if (fs.existsSync(candidateFilePath)) return { found: candidateFilePath, tried: attemptedPaths };
+  for (let i = 0; i <= maxDepth; i++) {
+    for (const filename of filenames) {
+      const filepath = path.join(currentDir, filename);
+      tried.push(filepath);
+      
+      if (fs.existsSync(filepath)) {
+        return { found: filepath, tried };
+      }
     }
-    const parentDirectory = path.dirname(currentDirectory);
-    if (!parentDirectory || parentDirectory === currentDirectory) break;
-    currentDirectory = parentDirectory;
+    
+    const parent = path.dirname(currentDir);
+    if (!parent || parent === currentDir) break;
+    currentDir = parent;
   }
-  return { found: null, tried: attemptedPaths };
+
+  return { found: null, tried };
 }
 
-/* Read JSON safely */
-function readJsonFileSecurely(targetFilePath, loggerInstance) {
+/**
+ * Safely read and parse JSON file
+ */
+function readJsonFile(filepath, logger) {
   try {
-    const fileContentRaw = fs.readFileSync(targetFilePath, "utf8");
-    return JSON.parse(fileContentRaw);
-  } catch (parseError) {
-    loggerInstance.warn(`[AIOPriceRandomizerLoader] failed to parse ${targetFilePath}: ${parseError && parseError.message ? parseError.message : parseError}`);
+    const content = fs.readFileSync(filepath, "utf8");
+    return JSON.parse(content);
+  } catch (err) {
+    logger.warn(`[Loader] Failed to parse ${filepath}: ${err.message}`);
     return null;
   }
 }
 
-/* Provide built-in defaults if no defaults file present */
-const BUILTIN_DEFAULT_CONFIGURATION = {
+/**
+ * Shallow merge with special handling for nested objects
+ */
+function mergeConfig(base, override) {
+  const result = Object.assign({}, base);
+  
+  for (const key in override) {
+    if (!override.hasOwnProperty(key)) continue;
+    
+    const value = override[key];
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      result[key] = Object.assign({}, base[key] || {}, value);
+    } else {
+      result[key] = value;
+    }
+  }
+  
+  return result;
+}
+
+const DEFAULT_CONFIG = {
   enabled: true,
   autoDiscoverTraderIds: true,
   traderIds: [],
@@ -90,103 +87,127 @@ const BUILTIN_DEFAULT_CONFIGURATION = {
   debug: false
 };
 
-function mergeConfigurationObjectsShallow(baseConfiguration, overrideConfiguration) {
-  const mergedConfiguration = Object.assign({}, baseConfiguration);
-  for (const configurationKey of Object.keys(overrideConfiguration || {})) {
-    if (overrideConfiguration[configurationKey] && typeof overrideConfiguration[configurationKey] === "object" && !Array.isArray(overrideConfiguration[configurationKey])) {
-      mergedConfiguration[configurationKey] = Object.assign({}, baseConfiguration[configurationKey] || {}, overrideConfiguration[configurationKey]);
+function loadAndValidateConfig(modDir, logger) {
+  // Try to load defaults file
+  const defaultsSearch = findConfigFile(modDir, ["config.defaults.json", "defaults.json"], 0);
+  const fileDefaults = defaultsSearch.found ? readJsonFile(defaultsSearch.found, logger) : null;
+  
+  if (fileDefaults) {
+    logger.info(`[Loader] Loaded defaults from ${defaultsSearch.found}`);
+  }
+
+  // Try to load user config
+  const configSearch = findConfigFile(
+    modDir, 
+    [path.join("config", "config.json"), "config.json"], 
+    6
+  );
+  const userConfig = configSearch.found ? readJsonFile(configSearch.found, logger) : null;
+  
+  if (userConfig) {
+    logger.info(`[Loader] Loaded user config from ${configSearch.found}`);
+  } else {
+    const searchPaths = configSearch.tried.slice(0, 5).join(", ");
+    logger.warn(`[Loader] No user config found (searched: ${searchPaths})`);
+  }
+
+  // Merge configurations: defaults -> file defaults -> user config
+  let config = mergeConfig(DEFAULT_CONFIG, fileDefaults || {});
+  config = mergeConfig(config, userConfig || {});
+  
+  // Handle nested objects separately to ensure deep merge
+  config.currencyTpls = Object.assign(
+    {},
+    DEFAULT_CONFIG.currencyTpls,
+    fileDefaults?.currencyTpls || {},
+    userConfig?.currencyTpls || {}
+  );
+  
+  config.CurrencyConversion = Object.assign(
+    {},
+    DEFAULT_CONFIG.CurrencyConversion,
+    fileDefaults?.CurrencyConversion || {},
+    userConfig?.CurrencyConversion || {}
+  );
+
+  // Normalize boolean values
+  config.enabled = !!config.enabled;
+  config.autoDiscoverTraderIds = !!config.autoDiscoverTraderIds;
+  config.onlyCashTrades = !!config.onlyCashTrades;
+  config.stickToBaseline = !!config.stickToBaseline;
+  config.debug = !!config.debug;
+
+  // Validate and normalize trader IDs
+  if (!Array.isArray(config.traderIds)) {
+    config.traderIds = [];
+  }
+  config.traderIds = Array.from(
+    new Set(config.traderIds.map(String).filter(id => id.length > 0))
+  );
+
+  // Validate multipliers
+  config.minMultiplier = Number(config.minMultiplier) || DEFAULT_CONFIG.minMultiplier;
+  config.maxMultiplier = Number(config.maxMultiplier) || DEFAULT_CONFIG.maxMultiplier;
+  
+  // Swap if min > max
+  if (config.minMultiplier > config.maxMultiplier) {
+    [config.minMultiplier, config.maxMultiplier] = [config.maxMultiplier, config.minMultiplier];
+  }
+
+  // Validate interval
+  config.intervalSeconds = Math.abs(
+    Math.floor(Number(config.intervalSeconds) || DEFAULT_CONFIG.intervalSeconds)
+  );
+
+  // Validate rounding modes
+  const validRounding = ["nearest", "floor", "ceil"];
+  if (!validRounding.includes(config.rounding)) {
+    config.rounding = DEFAULT_CONFIG.rounding;
+  }
+  if (!validRounding.includes(config.CurrencyConversion.rounding)) {
+    config.CurrencyConversion.rounding = DEFAULT_CONFIG.CurrencyConversion.rounding;
+  }
+
+  // Validate absolute price bounds
+  config.minAbsolute = Math.max(0, Number(config.minAbsolute) || 0);
+  config.maxAbsolute = Math.max(0, Number(config.maxAbsolute) || 0);
+  
+  if (config.maxAbsolute > 0 && config.minAbsolute > config.maxAbsolute) {
+    [config.minAbsolute, config.maxAbsolute] = [config.maxAbsolute, config.minAbsolute];
+  }
+
+  // Handle seed generation
+  if (config.seed == null) {
+    const seedData = JSON.stringify({
+      minMultiplier: config.minMultiplier,
+      maxMultiplier: config.maxMultiplier,
+      traderIds: config.traderIds
+    });
+    const hash = crypto.createHash("md5").update(seedData).digest("hex");
+    config.seed = parseInt(hash.slice(0, 8), 16) >>> 0;
+    config._derivedSeed = true;
+    
+    if (config.debug) {
+      logger.debug(`[Loader] Derived seed: ${config.seed}`);
+    }
+  } else {
+    const numericSeed = Number(config.seed);
+    if (Number.isFinite(numericSeed)) {
+      config.seed = Math.floor(Math.abs(numericSeed));
     } else {
-      mergedConfiguration[configurationKey] = overrideConfiguration[configurationKey];
-    }
-  }
-  return mergedConfiguration;
-}
-
-/* Main exported function */
-function loadAndValidateConfig(modDirectoryPath, rawLoggerInput) {
-  const normalizedLogger = normalizeLoggerInterface(rawLoggerInput);
-  // 1) try to find defaults near mod root (no deep search)
-  const defaultsFileSearchResult = searchDirectoryTreeUpward(modDirectoryPath, ["config.defaults.json", "defaults.json"], 0);
-  let loadedFileDefaults = null;
-  if (defaultsFileSearchResult.found) {
-    loadedFileDefaults = readJsonFileSecurely(defaultsFileSearchResult.found, normalizedLogger);
-    if (loadedFileDefaults) normalizedLogger.info(`[AIOPriceRandomizerLoader] loaded defaults from ${defaultsFileSearchResult.found}`);
-  } else {
-    normalizedLogger.debug && normalizedLogger.debug(`[AIOPriceRandomizerLoader] no defaults file at ${modDirectoryPath}`);
-  }
-
-  // 2) search for user config upward
-  const userConfigSearchResult = searchDirectoryTreeUpward(modDirectoryPath, [path.join("config", "config.json"), "config.json"], 6);
-  if (!userConfigSearchResult.found) {
-    normalizedLogger.warn(`[AIOPriceRandomizerLoader] No user config found near ${modDirectoryPath}; using defaults. (tried ${userConfigSearchResult.tried.slice(0,8).join(" | ")})`);
-  }
-
-  let loadedUserConfiguration = null;
-  if (userConfigSearchResult.found) {
-    loadedUserConfiguration = readJsonFileSecurely(userConfigSearchResult.found, normalizedLogger);
-    if (loadedUserConfiguration) normalizedLogger.info(`[AIOPriceRandomizerLoader] loaded user config from ${userConfigSearchResult.found}`);
-  }
-
-  // 3) merge: built-in <- fileDefaults <- userConfig
-  let mergedConfiguration = mergeConfigurationObjectsShallow(BUILTIN_DEFAULT_CONFIGURATION, loadedFileDefaults || {});
-  mergedConfiguration = mergeConfigurationObjectsShallow(mergedConfiguration, loadedUserConfiguration || {});
-
-  // ensure nested objects merged shallowly
-  mergedConfiguration.currencyTpls = Object.assign({}, BUILTIN_DEFAULT_CONFIGURATION.currencyTpls, (loadedFileDefaults && loadedFileDefaults.currencyTpls) || {}, (loadedUserConfiguration && loadedUserConfiguration.currencyTpls) || {});
-  mergedConfiguration.CurrencyConversion = Object.assign({}, BUILTIN_DEFAULT_CONFIGURATION.CurrencyConversion, (loadedFileDefaults && loadedFileDefaults.CurrencyConversion) || {}, (loadedUserConfiguration && loadedUserConfiguration.CurrencyConversion) || {});
-
-  // Normalize and validate
-  mergedConfiguration.enabled = !!mergedConfiguration.enabled;
-  mergedConfiguration.autoDiscoverTraderIds = !!mergedConfiguration.autoDiscoverTraderIds;
-  mergedConfiguration.onlyCashTrades = !!mergedConfiguration.onlyCashTrades;
-  mergedConfiguration.stickToBaseline = !!mergedConfiguration.stickToBaseline;
-  mergedConfiguration.debug = !!mergedConfiguration.debug;
-
-  if (!Array.isArray(mergedConfiguration.traderIds)) mergedConfiguration.traderIds = [];
-  mergedConfiguration.traderIds = mergedConfiguration.traderIds.map(String).filter(traderIdString => traderIdString.length > 0);
-  mergedConfiguration.traderIds = Array.from(new Set(mergedConfiguration.traderIds));
-
-  mergedConfiguration.minMultiplier = Number(mergedConfiguration.minMultiplier);
-  mergedConfiguration.maxMultiplier = Number(mergedConfiguration.maxMultiplier);
-  if (!Number.isFinite(mergedConfiguration.minMultiplier)) mergedConfiguration.minMultiplier = BUILTIN_DEFAULT_CONFIGURATION.minMultiplier;
-  if (!Number.isFinite(mergedConfiguration.maxMultiplier)) mergedConfiguration.maxMultiplier = BUILTIN_DEFAULT_CONFIGURATION.maxMultiplier;
-  if (mergedConfiguration.minMultiplier > mergedConfiguration.maxMultiplier) {
-    const temporaryMinMultiplier = mergedConfiguration.minMultiplier; mergedConfiguration.minMultiplier = mergedConfiguration.maxMultiplier; mergedConfiguration.maxMultiplier = temporaryMinMultiplier;
-    normalizedLogger.warn("[AIOPriceRandomizerLoader] minMultiplier > maxMultiplier — swapped values.");
-  }
-
-  mergedConfiguration.intervalSeconds = Number.isFinite(Number(mergedConfiguration.intervalSeconds)) ? Math.floor(Math.abs(Number(mergedConfiguration.intervalSeconds))) : BUILTIN_DEFAULT_CONFIGURATION.intervalSeconds;
-  if (!["nearest","floor","ceil"].includes(mergedConfiguration.rounding)) mergedConfiguration.rounding = BUILTIN_DEFAULT_CONFIGURATION.rounding;
-  if (!["nearest","floor","ceil"].includes(mergedConfiguration.CurrencyConversion.rounding)) mergedConfiguration.CurrencyConversion.rounding = BUILTIN_DEFAULT_CONFIGURATION.CurrencyConversion.rounding;
-
-  mergedConfiguration.minAbsolute = Number(mergedConfiguration.minAbsolute) || 0;
-  mergedConfiguration.maxAbsolute = Number(mergedConfiguration.maxAbsolute) || 0;
-  if (mergedConfiguration.minAbsolute < 0) mergedConfiguration.minAbsolute = 0;
-  if (mergedConfiguration.maxAbsolute < 0) mergedConfiguration.maxAbsolute = 0;
-  if (mergedConfiguration.maxAbsolute > 0 && mergedConfiguration.minAbsolute > mergedConfiguration.maxAbsolute) {
-    const temporaryMinAbsolute = mergedConfiguration.minAbsolute; mergedConfiguration.minAbsolute = mergedConfiguration.maxAbsolute; mergedConfiguration.maxAbsolute = temporaryMinAbsolute;
-    normalizedLogger.warn("[AIOPriceRandomizerLoader] minAbsolute > maxAbsolute — swapped values.");
-  }
-
-  // Seed handling for deterministic randomization across server restarts
-  if (mergedConfiguration.seed == null) {
-    // Generate seed from config parameters to ensure consistent randomization patterns
-    const seedHashBaseString = JSON.stringify({ minMultiplier: mergedConfiguration.minMultiplier, maxMultiplier: mergedConfiguration.maxMultiplier, traderIds: mergedConfiguration.traderIds });
-    mergedConfiguration.seed = parseInt(crypto.createHash("md5").update(seedHashBaseString).digest("hex").slice(0,8), 16) >>> 0;
-    mergedConfiguration._derivedSeed = true;
-    normalizedLogger.debug && normalizedLogger.debug(`[AIOPriceRandomizerLoader] derived seed ${mergedConfiguration.seed}`);
-  } else {
-    if (typeof mergedConfiguration.seed === "number" && Number.isFinite(mergedConfiguration.seed)) mergedConfiguration.seed = Math.floor(Math.abs(mergedConfiguration.seed));
-    else if (typeof mergedConfiguration.seed === "string" && /^\\d+$/.test(mergedConfiguration.seed)) mergedConfiguration.seed = parseInt(mergedConfiguration.seed, 10);
-    else {
-      normalizedLogger.warn("[AIOPriceRandomizerLoader] Invalid seed provided; deriving seed instead.");
-      const seedHashBaseString = JSON.stringify({ minMultiplier: mergedConfiguration.minMultiplier, maxMultiplier: mergedConfiguration.maxMultiplier, traderIds: mergedConfiguration.traderIds });
-      mergedConfiguration.seed = parseInt(crypto.createHash("md5").update(seedHashBaseString).digest("hex").slice(0,8), 16) >>> 0;
-      mergedConfiguration._derivedSeed = true;
+      logger.warn("[Loader] Invalid seed provided, deriving from config");
+      const seedData = JSON.stringify({
+        minMultiplier: config.minMultiplier,
+        maxMultiplier: config.maxMultiplier,
+        traderIds: config.traderIds
+      });
+      const hash = crypto.createHash("md5").update(seedData).digest("hex");
+      config.seed = parseInt(hash.slice(0, 8), 16) >>> 0;
+      config._derivedSeed = true;
     }
   }
 
-  return { config: mergedConfiguration, tried: userConfigSearchResult.tried };
+  return { config, tried: configSearch.tried };
 }
 
 module.exports = { loadAndValidateConfig };

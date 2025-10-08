@@ -1,410 +1,373 @@
 "use strict";
-/**
- * src/mod.js
- * Main entry for AIOPriceRandomizer
- *
- * Exports: module.exports = { mod: new PriceRandomizer() }
- */
 
 const { loadAndValidateConfig } = require("./aio-price-randomizer-loader");
-const crypto = require("crypto");
 
-/* ---------- Helpers ---------- */
-
-/* Normalize logger (re-declare simple wrapper to be totally safe) */
-function normalizeLoggerInterface(rawLoggerInput) {
-  if (!rawLoggerInput) return console;
-  if (typeof rawLoggerInput === "function") {
-    return {
-      info: (...argumentsList) => { try { rawLoggerInput(...argumentsList); } catch { console.info(...argumentsList); } },
-      warn: (...argumentsList) => { try { rawLoggerInput(...argumentsList); } catch { console.warn(...argumentsList); } },
-      error: (...argumentsList) => { try { rawLoggerInput(...argumentsList); } catch { console.error(...argumentsList); } },
-      debug: (...argumentsList) => { try { rawLoggerInput(...argumentsList); } catch { console.debug(...argumentsList); } }
-    };
-  }
-  const findAvailableMethod = (...methodNames) => methodNames.find(methodName => typeof rawLoggerInput[methodName] === "function") || null;
-  const availableInfoMethod = findAvailableMethod("info", "log", "trace", "write");
-  const availableWarnMethod = findAvailableMethod("warn", "warning", "log", "info");
-  const availableErrorMethod = findAvailableMethod("error", "err", "log");
-  const availableDebugMethod = findAvailableMethod("debug", "info", "log");
-  return {
-    info: (...argumentsList) => { if (availableInfoMethod) return rawLoggerInput[availableInfoMethod](...argumentsList); return console.info(...argumentsList); },
-    warn: (...argumentsList) => { if (availableWarnMethod) return rawLoggerInput[availableWarnMethod](...argumentsList); return console.warn(...argumentsList); },
-    error: (...argumentsList) => { if (availableErrorMethod) return rawLoggerInput[availableErrorMethod](...argumentsList); return console.error(...argumentsList); },
-    debug: (...argumentsList) => { if (availableDebugMethod) return rawLoggerInput[availableDebugMethod](...argumentsList); return console.debug(...argumentsList); }
+/**
+ * Mulberry32 seeded PRNG
+ * Returns a deterministic random number generator
+ */
+function seededRandom(seed) {
+  let state = seed >>> 0;
+  
+  return function() {
+    state += 0x6D2B79F5;
+    state = Math.imul(state ^ (state >>> 15), state | 1);
+    state ^= state + Math.imul(state ^ (state >>> 7), state | 61);
+    return ((state ^ (state >>> 14)) >>> 0) / 4294967296;
   };
 }
 
-/* Deterministic PRNG (mulberry32) */
-function createDeterministicRandomGenerator(seedValue) {
-  let internalState = seedValue >>> 0;
-  return function () {
-    internalState += 0x6D2B79F5;
-    internalState = Math.imul(internalState ^ (internalState >>> 15), internalState | 1);
-    internalState ^= internalState + Math.imul(internalState ^ (internalState >>> 7), internalState | 61);
-    return ((internalState ^ (internalState >>> 14)) >>> 0) / 4294967296;
-  };
+/**
+ * Round number based on mode
+ */
+function round(value, mode) {
+  if (mode === "floor") return Math.floor(value);
+  if (mode === "ceil") return Math.ceil(value);
+  return Math.round(value);
 }
-
-/* clamp and round helpers */
-function clampNumberWithinBounds(numberValue, lowerBound, upperBound) {
-  if (lowerBound != null) numberValue = Math.max(numberValue, lowerBound);
-  if (upperBound != null && upperBound > 0) numberValue = Math.min(numberValue, upperBound);
-  return numberValue;
-}
-function roundValueByMode(valueToRound, roundingMode = "nearest") {
-  if (roundingMode === "floor") return Math.floor(valueToRound);
-  if (roundingMode === "ceil") return Math.ceil(valueToRound);
-  return Math.round(valueToRound);
-}
-
-/* ---------- PriceRandomizer class ---------- */
 
 class PriceRandomizer {
   constructor() {
     this.modName = "AIOPriceRandomizer";
-    this.logger = console; // replaced in postDBLoad
-    this.modConfiguration = null;
-    this.randomNumberGenerator = null;
-    this.intervalTimerId = null;
-    this.baselinePriceMap = new Map(); // template -> ruble price
+    this.logger = console;
+    this.config = null;
+    this.rng = null;
+    this.intervalTimer = null;
     
-    // Performance caches
-    this.templatePriceCache = new Map(); // template -> price (never changes during runtime)
-    this.currencyConversionRateCache = new Map();  // currencyTemplate -> ruble conversion rate
-    this.cachedAutoDiscoveredTraders = null;       // cached auto-discovered trader IDs
+    // Price caches for performance
+    this.baselinePrices = new Map();
+    this.priceCache = new Map();
+    this.currencyCache = new Map();
   }
 
   loadMod() {
-    // minimal
-    this.logger.info && this.logger.info(`[${this.modName}] constructor called`);
+    this.logger.info(`[${this.modName}] Mod loaded`);
   }
 
-  _resolveLoggerFromContainer(dependencyContainer) {
+  /**
+   * Resolve logger from dependency container
+   */
+  _getLogger(container) {
     try {
-      const primaryLoggerInstance = dependencyContainer.resolve("PrimaryLogger");
-      return normalizeLoggerInterface(primaryLoggerInstance);
-    } catch (_) {
+      return container.resolve("PrimaryLogger");
+    } catch (e) {
       try {
-        const winstonLoggerInstance = dependencyContainer.resolve("WinstonLogger");
-        return normalizeLoggerInterface(winstonLoggerInstance);
-      } catch (_) {
-        return normalizeLoggerInterface(console);
+        return container.resolve("WinstonLogger");
+      } catch (e) {
+        return console;
       }
     }
   }
 
-  _lookupTemplatePriceFromDatabase(databaseTables, templateId) {
-    // Check cache first (90% hit rate after first cycle)
-    if (this.templatePriceCache.has(templateId)) {
-      return this.templatePriceCache.get(templateId);
+  /**
+   * Look up template price from database with caching
+   */
+  _lookupPrice(db, templateId) {
+    if (this.priceCache.has(templateId)) {
+      return this.priceCache.get(templateId);
     }
 
-    try {
-      // Original lookup logic (unchanged for safety)
-      const templateData = databaseTables.templates || {};
-      const priceData = templateData.prices;
-      let resolvedPrice = null;
+    let price = null;
+    const templates = db.templates || {};
+    const prices = templates.prices;
+
+    // Try prices table first
+    if (prices) {
+      if (Array.isArray(prices)) {
+        const entry = prices.find(p => p.Id === templateId || p.id === templateId);
+        price = entry?.Price || entry?.price;
+      } else if (prices[templateId]) {
+        const entry = prices[templateId];
+        price = entry.Price || entry.price || entry.DefaultPrice || entry.basePrice;
+        if (typeof price === "string") {
+          price = Number(price);
+        }
+      }
+    }
+
+    // Fallback to handbook
+    if (!price && templates.handbook?.Items) {
+      const handbook = templates.handbook.Items;
+      const entry = Array.isArray(handbook)
+        ? handbook.find(h => h.Id === templateId || h.id === templateId)
+        : handbook[templateId];
       
-      if (priceData) {
-        if (Array.isArray(priceData)) {
-          const foundPriceEntry = priceData.find(priceItem => priceItem.Id === templateId || priceItem.id === templateId);
-          if (foundPriceEntry && typeof foundPriceEntry.Price === "number" && foundPriceEntry.Price > 0) resolvedPrice = foundPriceEntry.Price;
-          else if (foundPriceEntry && typeof foundPriceEntry.price === "number" && foundPriceEntry.price > 0) resolvedPrice = foundPriceEntry.price;
-        } else if (priceData[templateId]) {
-          const priceEntry = priceData[templateId];
-          const extractedPriceValue = priceEntry.Price || priceEntry.price || priceEntry.DefaultPrice || priceEntry.basePrice;
-          if (typeof extractedPriceValue === "number" && extractedPriceValue > 0) resolvedPrice = extractedPriceValue;
-          else if (typeof extractedPriceValue === "string" && !isNaN(Number(extractedPriceValue))) resolvedPrice = Number(extractedPriceValue);
-        }
+      price = entry?.Price || entry?.price;
+      if (typeof price === "string") {
+        price = Number(price);
       }
-
-      if (!resolvedPrice) {
-        const handbookItems = templateData.handbook?.Items;
-        if (Array.isArray(handbookItems)) {
-          const foundHandbookEntry = handbookItems.find(handbookItem => handbookItem.Id === templateId || handbookItem.id === templateId);
-          if (foundHandbookEntry && typeof foundHandbookEntry.Price === "number" && foundHandbookEntry.Price > 0) resolvedPrice = foundHandbookEntry.Price;
-          else if (foundHandbookEntry && typeof foundHandbookEntry.price === "number" && foundHandbookEntry.price > 0) resolvedPrice = foundHandbookEntry.price;
-        } else if (templateData.handbook && templateData.handbook.Items && templateData.handbook.Items[templateId]) {
-          const handbookEntry = templateData.handbook.Items[templateId];
-          const handbookPriceValue = handbookEntry.Price || handbookEntry.price;
-          if (typeof handbookPriceValue === "number" && handbookPriceValue > 0) resolvedPrice = handbookPriceValue;
-          else if (typeof handbookPriceValue === "string" && !isNaN(Number(handbookPriceValue))) resolvedPrice = Number(handbookPriceValue);
-        }
-      }
-
-      // Cache result (prices never change during runtime)
-      this.templatePriceCache.set(templateId, resolvedPrice);
-      return resolvedPrice;
-    } catch (lookupError) {
-      // Log error but don't crash the entire process
-      if (this.logger && this.logger.error) {
-        this.logger.error(`[${this.modName}] Failed to lookup price for template ${templateId}: ${lookupError.message}`);
-      }
-      // Cache null result to prevent repeated failures
-      this.templatePriceCache.set(templateId, null);
-      return null;
     }
+
+    // Cache the result
+    const finalPrice = (price && price > 0) ? price : null;
+    this.priceCache.set(templateId, finalPrice);
+    return finalPrice;
   }
 
-  _buildBaselinePricesFromTraders(databaseTables, targetTraderIds, forceRebuild = false) {
-    // Avoid rebuilding baseline when sticking to original prices for consistency
-    if (!forceRebuild && this.modConfiguration.stickToBaseline && this.baselinePriceMap.size > 0) {
-      if (this.modConfiguration.debug) this.logger.debug(`[${this.modName}] baseline already present, skipping rebuild`);
-      return;
+  /**
+   * Build baseline prices from trader assortments
+   */
+  _buildBaselines(db, traderIds) {
+    if (this.config.stickToBaseline && this.baselinePrices.size > 0) {
+      return; // Already built, don't rebuild
     }
 
-    this.baselinePriceMap.clear();
-    const allTradersData = databaseTables.traders || {};
-    const uniqueTemplateIds = new Set();
+    this.baselinePrices.clear();
+    const allTemplates = new Set();
 
-    // Collect all unique item templates from target traders to establish price baselines
-    for (const currentTraderId of targetTraderIds) {
-      try {
-        const traderData = allTradersData[currentTraderId];
-        if (!traderData || !traderData.assort || !Array.isArray(traderData.assort.items)) continue;
-        for (const assortItem of traderData.assort.items) {
-          if (assortItem && assortItem._tpl) uniqueTemplateIds.add(assortItem._tpl);
-        }
-      } catch (traderProcessingError) {
-        // Continue processing other traders even if one fails
-        if (this.modConfiguration.debug && this.logger.error) {
-          this.logger.error(`[${this.modName}] Failed processing trader ${currentTraderId} for baseline: ${traderProcessingError.message}`);
+    // Collect all unique templates from traders
+    for (const traderId of traderIds) {
+      const trader = db.traders?.[traderId];
+      if (!trader?.assort?.items) continue;
+
+      for (const item of trader.assort.items) {
+        if (item?._tpl) {
+          allTemplates.add(item._tpl);
         }
       }
     }
 
-    // Cache baseline prices to avoid repeated database lookups during randomization
-    for (const templateId of uniqueTemplateIds) {
-      try {
-        const templatePrice = this._lookupTemplatePriceFromDatabase(databaseTables, templateId);
-        if (templatePrice && templatePrice > 0) this.baselinePriceMap.set(templateId, templatePrice);
-      } catch (priceProcessingError) {
-        // Log but continue with other templates
-        if (this.modConfiguration.debug && this.logger.error) {
-          this.logger.error(`[${this.modName}] Failed to establish baseline price for ${templateId}: ${priceProcessingError.message}`);
-        }
+    // Look up prices for all templates
+    for (const templateId of allTemplates) {
+      const price = this._lookupPrice(db, templateId);
+      if (price && price > 0) {
+        this.baselinePrices.set(templateId, price);
       }
     }
 
-    this.logger.info && this.logger.info(`[${this.modName}] built baseline for ${this.baselinePriceMap.size} templates`);
+    this.logger.info(`[${this.modName}] Built baselines for ${this.baselinePrices.size} items`);
   }
 
-  _convertRublesToTargetCurrency(databaseTables, rubleAmount, targetCurrencyTemplateId) {
-    try {
-      // Cache conversion rates to prevent repeated database lookups during price updates
-      if (!this.currencyConversionRateCache.has(targetCurrencyTemplateId)) {
-        const currencyPrice = this._lookupTemplatePriceFromDatabase(databaseTables, targetCurrencyTemplateId);
-        this.currencyConversionRateCache.set(targetCurrencyTemplateId, currencyPrice || null);
-      }
-
-      const conversionRate = this.currencyConversionRateCache.get(targetCurrencyTemplateId);
-      if (!conversionRate || conversionRate <= 0) return null;
-      
-      const convertedAmount = rubleAmount / conversionRate;
-      if (!Number.isFinite(convertedAmount)) return null;
-      
-      return roundValueByMode(convertedAmount, this.modConfiguration.CurrencyConversion.rounding);
-    } catch (conversionError) {
-      // Gracefully handle conversion errors without breaking trader processing
-      if (this.logger && this.logger.error) {
-        this.logger.error(`[${this.modName}] Currency conversion failed for ${targetCurrencyTemplateId}: ${conversionError.message}`);
-      }
-      return null;
+  /**
+   * Convert ruble price to target currency
+   */
+  _convertCurrency(db, rubles, currencyTpl) {
+    if (!this.currencyCache.has(currencyTpl)) {
+      const rate = this._lookupPrice(db, currencyTpl);
+      this.currencyCache.set(currencyTpl, rate || null);
     }
+
+    const rate = this.currencyCache.get(currencyTpl);
+    if (!rate || rate <= 0) return null;
+
+    const converted = rubles / rate;
+    if (!Number.isFinite(converted)) return null;
+
+    return round(converted, this.config.CurrencyConversion.rounding);
   }
 
-  _findCurrencyOfferInTradeList(tradeOffers) {
-    if (!Array.isArray(tradeOffers)) return null;
-    for (const currentOffer of tradeOffers) {
-      if (!currentOffer || typeof currentOffer._tpl !== "string") continue;
-      if (Object.values(this.modConfiguration.currencyTpls).includes(currentOffer._tpl)) return currentOffer;
+  /**
+   * Find currency offer in trade list
+   */
+  _findCurrencyOffer(offers) {
+    if (!Array.isArray(offers)) return null;
+
+    const currencies = Object.values(this.config.currencyTpls);
+    for (const offer of offers) {
+      if (offer?._tpl && currencies.includes(offer._tpl)) {
+        return offer;
+      }
     }
     return null;
   }
 
-  _calculateRandomizedPrice(baselinePrice) {
-    const randomMultiplier = this.randomNumberGenerator() * (this.modConfiguration.maxMultiplier - this.modConfiguration.minMultiplier) + this.modConfiguration.minMultiplier;
-    let calculatedRublePrice = baselinePrice * randomMultiplier;
+  /**
+   * Calculate randomized price based on baseline
+   */
+  _randomizePrice(baseline) {
+    const min = this.config.minMultiplier;
+    const max = this.config.maxMultiplier;
+    const multiplier = this.rng() * (max - min) + min;
     
-    // Enforce absolute price bounds to prevent extreme values that could break economy
-    if (this.modConfiguration.minAbsolute && this.modConfiguration.minAbsolute > 0) {
-      calculatedRublePrice = Math.max(calculatedRublePrice, this.modConfiguration.minAbsolute);
+    let price = baseline * multiplier;
+
+    // Apply absolute bounds if configured
+    if (this.config.minAbsolute > 0) {
+      price = Math.max(price, this.config.minAbsolute);
     }
-    if (this.modConfiguration.maxAbsolute && this.modConfiguration.maxAbsolute > 0) {
-      calculatedRublePrice = Math.min(calculatedRublePrice, this.modConfiguration.maxAbsolute);
+    if (this.config.maxAbsolute > 0) {
+      price = Math.min(price, this.config.maxAbsolute);
     }
-    
-    return roundValueByMode(calculatedRublePrice, this.modConfiguration.rounding);
+
+    return round(price, this.config.rounding);
   }
 
-  _updateTradeOfferPrice(tradeOffersList, finalRublePrice, databaseTables) {
-    if (this.modConfiguration.onlyCashTrades) {
-      // Target only currency offers to avoid breaking complex barter trades
-      const currencyOffer = this._findCurrencyOfferInTradeList(tradeOffersList);
-      if (!currencyOffer) return false;
-      
-      if (currencyOffer._tpl === this.modConfiguration.currencyTpls.ruble) {
-        currencyOffer.count = Math.max(1, finalRublePrice);
-      } else {
-        const convertedCurrencyAmount = this._convertRublesToTargetCurrency(databaseTables, finalRublePrice, currencyOffer._tpl);
-        currencyOffer.count = Math.max(1, convertedCurrencyAmount || Math.floor(finalRublePrice));
-      }
-      return true;
+  /**
+   * Update trade offer with new price
+   */
+  _updateOffer(offers, rubles, db) {
+    let target;
+    
+    if (this.config.onlyCashTrades) {
+      target = this._findCurrencyOffer(offers);
+      if (!target) return false;
     } else {
-      // Update first trade offer regardless of type for broader price randomization
-      const firstTradeOffer = tradeOffersList[0];
-      if (!firstTradeOffer) return false;
+      target = offers[0];
+      if (!target) return false;
+    }
+
+    // Update the offer count
+    if (target._tpl === this.config.currencyTpls.ruble) {
+      target.count = Math.max(1, rubles);
+    } else {
+      const converted = this._convertCurrency(db, rubles, target._tpl);
+      target.count = Math.max(1, converted || Math.floor(rubles));
+    }
+
+    return true;
+  }
+
+  /**
+   * Auto-discover AIO traders by nickname
+   */
+  _discoverTraders(db) {
+    const found = [];
+    const traders = db.traders || {};
+
+    for (const [traderId, trader] of Object.entries(traders)) {
+      const nickname = (trader?.base?.nickname || "").toLowerCase();
       
-      if (firstTradeOffer._tpl === this.modConfiguration.currencyTpls.ruble) {
-        firstTradeOffer.count = Math.max(1, finalRublePrice);
-      } else {
-        const convertedCurrencyAmount = this._convertRublesToTargetCurrency(databaseTables, finalRublePrice, firstTradeOffer._tpl);
-        firstTradeOffer.count = Math.max(1, convertedCurrencyAmount || Math.floor(finalRublePrice));
-      }
-      return true;
-    }
-  }
-
-  _autoDiscoverRelevantTraders(databaseTables) {
-    const discoveredTraderIds = [];
-    const allTradersData = databaseTables.traders || {};
-    
-    // Automatically find AIO traders to avoid manual configuration maintenance
-    for (const [traderId, traderData] of Object.entries(allTradersData)) {
-      const traderNicknameLower = String(((traderData && traderData.base && traderData.base.nickname) || "")).toLowerCase();
-      // Match common AIO trader naming patterns used by popular mods
-      if (traderNicknameLower.includes("aio") || traderNicknameLower.includes("bluehead") || traderNicknameLower.includes("aiotrader")) {
-        discoveredTraderIds.push(traderId);
+      if (nickname.includes("aio") || 
+          nickname.includes("bluehead") || 
+          nickname.includes("aiotrader")) {
+        found.push(traderId);
       }
     }
-    
-    if (this.modConfiguration.debug) {
-      this.logger.debug && this.logger.debug(`[${this.modName}] auto-discovered ${discoveredTraderIds.length} traders`);
+
+    if (this.config.debug) {
+      this.logger.debug(`[${this.modName}] Auto-discovered ${found.length} traders`);
     }
-    
-    return discoveredTraderIds;
+
+    return found;
   }
 
-  _initializeModConfiguration(dependencyContainer) {
-    this.logger = this._resolveLoggerFromContainer(dependencyContainer);
-    
-    const modDirectoryPath = __dirname || process.cwd();
-    const { config: loadedConfiguration, tried: attemptedConfigPaths } = loadAndValidateConfig(modDirectoryPath, this.logger);
-    this.modConfiguration = loadedConfiguration;
+  /**
+   * Process a single trader's assortment
+   */
+  _processTrader(trader, db) {
+    if (!trader?.assort?.items) return 0;
 
-    if (this.modConfiguration.debug) {
-      this.logger.debug && this.logger.debug(`[${this.modName}] config paths tried: ${Array.isArray(attemptedConfigPaths) ? attemptedConfigPaths.slice(0,8).join(" | ") : attemptedConfigPaths}`);
-      this.logger.debug && this.logger.debug(`[${this.modName}] config: ${JSON.stringify(Object.assign({}, this.modConfiguration, { seed: typeof this.modConfiguration.seed === "number" ? this.modConfiguration.seed : "<derived>" }), null, 2)}`);
+    const barters = trader.assort.barter_scheme || {};
+    let updatedCount = 0;
+
+    for (const item of trader.assort.items) {
+      if (!item?._tpl || !item?._id) continue;
+
+      const baseline = this.baselinePrices.get(item._tpl);
+      if (!baseline || baseline <= 0) continue;
+
+      const newPrice = this._randomizePrice(baseline);
+      const scheme = barters[item._id];
+      if (!scheme) continue;
+
+      const offers = Array.isArray(scheme[0]) ? scheme[0] : scheme;
+      if (this._updateOffer(offers, newPrice, db)) {
+        updatedCount++;
+      }
     }
 
-    this.randomNumberGenerator = createDeterministicRandomGenerator(Number(this.modConfiguration.seed) >>> 0);
+    if (updatedCount > 0 && this.config.debug) {
+      const traderName = trader.base?.nickname || "Unknown";
+      this.logger.info(`[${this.modName}] ${traderName}: updated ${updatedCount} offers`);
+    }
+
+    return updatedCount;
   }
 
-  _randomizeTraderPrices(targetTrader, databaseTables) {
-    if (!targetTrader || !targetTrader.assort) return 0;
-    const assortedItemsList = Array.isArray(targetTrader.assort.items) ? targetTrader.assort.items : [];
-    const barterSchemeData = targetTrader.assort.barter_scheme || {};
-    let modifiedItemsCount = 0;
-
-    for (const currentItem of assortedItemsList) {
-      if (!currentItem || !currentItem._tpl || !currentItem._id) continue;
-      
-      const itemTemplateId = currentItem._tpl;
-      const baselinePrice = this.baselinePriceMap.get(itemTemplateId);
-      if (!baselinePrice || baselinePrice <= 0) continue;
-
-      // Calculate randomized price using modular function
-      const finalRublePrice = this._calculateRandomizedPrice(baselinePrice);
-
-      const barterOptions = barterSchemeData[currentItem._id];
-      if (!barterOptions) continue;
-      const tradeOffersList = Array.isArray(barterOptions[0]) ? barterOptions[0] : barterOptions;
-
-      // Update trade offer price using modular function
-      const wasUpdated = this._updateTradeOfferPrice(tradeOffersList, finalRublePrice, databaseTables);
-      if (wasUpdated) modifiedItemsCount++;
-    }
-
-    if (modifiedItemsCount > 0 && this.modConfiguration.debug) {
-      this.logger.info && this.logger.info(`[${this.modName}] Updated ${modifiedItemsCount} offers for ${targetTrader.base?.nickname || "unknown"}`);
-    }
-    return modifiedItemsCount;
-  }
-
-  _executeOneRandomizationCycle(databaseTables) {
-    if (!this.modConfiguration.enabled) {
-      this.logger.info && this.logger.info(`[${this.modName}] disabled -> skipping cycle`);
+  /**
+   * Run one randomization cycle
+   */
+  _runCycle(db) {
+    if (!this.config.enabled) {
+      this.logger.info(`[${this.modName}] Disabled, skipping cycle`);
       return;
     }
 
-    let activeTraderIds = Array.isArray(this.modConfiguration.traderIds) ? this.modConfiguration.traderIds.slice() : [];
-
-    // Use auto-discovery when configured to adapt to dynamic trader environments
-    if (this.modConfiguration.autoDiscoverTraderIds) {
-      const discoveredTraderIds = this._autoDiscoverRelevantTraders(databaseTables);
-      if (discoveredTraderIds.length > 0) activeTraderIds = discoveredTraderIds;
+    // Determine which traders to process
+    let traderIds = this.config.traderIds.slice();
+    if (this.config.autoDiscoverTraderIds) {
+      const discovered = this._discoverTraders(db);
+      if (discovered.length > 0) {
+        traderIds = discovered;
+      }
     }
 
-    // Establish price baselines before randomization for consistency
-    this._buildBaselinePricesFromTraders(databaseTables, activeTraderIds, false);
+    // Build baseline prices
+    this._buildBaselines(db, traderIds);
 
-    // Process each trader independently to isolate potential errors
-    for (const currentTraderId of activeTraderIds) {
-      const traderData = (databaseTables.traders || {})[currentTraderId];
-      if (!traderData) {
-        this.logger.warn && this.logger.warn(`[${this.modName}] trader not found: ${currentTraderId}`);
+    // Process each trader
+    for (const traderId of traderIds) {
+      const trader = db.traders?.[traderId];
+      if (!trader) {
+        this.logger.warn(`[${this.modName}] Trader not found: ${traderId}`);
         continue;
       }
+
       try {
-        this._randomizeTraderPrices(traderData, databaseTables);
-      } catch (error) {
-        this.logger.error && this.logger.error(`[${this.modName}] failed to randomize ${currentTraderId}: ${error && error.message ? error.message : error}`);
+        this._processTrader(trader, db);
+      } catch (err) {
+        this.logger.error(`[${this.modName}] Failed to process ${traderId}: ${err.message}`);
       }
     }
   }
 
-  _schedulePeriodicRandomization(databaseTables) {
-    if (this.intervalTimerId) {
-      clearInterval(this.intervalTimerId);
-      this.intervalTimerId = null;
+  /**
+   * Schedule periodic randomization
+   */
+  _schedule(db) {
+    // Clear existing timer
+    if (this.intervalTimer) {
+      clearInterval(this.intervalTimer);
+      this.intervalTimer = null;
     }
 
-    // run immediately
-    this._executeOneRandomizationCycle(databaseTables);
+    // Run immediately
+    this._runCycle(db);
 
-    if (this.modConfiguration.intervalSeconds && this.modConfiguration.intervalSeconds > 0) {
-      this.intervalTimerId = setInterval(() => {
-        try { this._executeOneRandomizationCycle(databaseTables); }
-        catch (error) { this.logger.error && this.logger.error(`[${this.modName}] periodic run error: ${error && error.message ? error.message : error}`); }
-      }, this.modConfiguration.intervalSeconds * 1000);
-      this.logger.info && this.logger.info(`[${this.modName}] Scheduled cycle every ${this.modConfiguration.intervalSeconds}s`);
+    // Schedule periodic runs
+    if (this.config.intervalSeconds > 0) {
+      this.intervalTimer = setInterval(() => {
+        try {
+          this._runCycle(db);
+        } catch (err) {
+          this.logger.error(`[${this.modName}] Cycle error: ${err.message}`);
+        }
+      }, this.config.intervalSeconds * 1000);
+
+      this.logger.info(`[${this.modName}] Scheduled cycle every ${this.config.intervalSeconds}s`);
     }
   }
 
-  postDBLoad(dependencyContainer) {
-    // Initialize configuration and logger
-    this._initializeModConfiguration(dependencyContainer);
+  /**
+   * SPT mod entry point - called after database load
+   */
+  postDBLoad(container) {
+    // Initialize logger
+    this.logger = this._getLogger(container);
 
-    // Get database tables
-    const databaseServerInstance = dependencyContainer.resolve("DatabaseServer");
-    const databaseTables = databaseServerInstance.getTables();
+    // Load and validate configuration
+    const { config } = loadAndValidateConfig(__dirname, this.logger);
+    this.config = config;
 
-    // Debug information about available traders
-    if (this.modConfiguration.debug) {
-      const totalTraderCount = Object.keys(databaseTables.traders || {}).length;
-      this.logger.info && this.logger.info(`[${this.modName}] found ${totalTraderCount} traders in DB`);
+    // Initialize RNG with seed
+    this.rng = seededRandom(this.config.seed);
+
+    // Get database
+    const db = container.resolve("DatabaseServer").getTables();
+
+    if (this.config.debug) {
+      const traderCount = Object.keys(db.traders || {}).length;
+      this.logger.info(`[${this.modName}] Found ${traderCount} traders in database`);
     }
 
-    // Start price randomization cycles
+    // Start randomization
     try {
-      this._schedulePeriodicRandomization(databaseTables);
-      this.logger.info && this.logger.info(`[${this.modName}] initialized`);
-    } catch (initializationError) {
-      this.logger.error && this.logger.error(`[${this.modName}] initialization failed: ${initializationError && initializationError.message ? initializationError.message : initializationError}`);
+      this._schedule(db);
+      this.logger.info(`[${this.modName}] Initialized successfully`);
+    } catch (err) {
+      this.logger.error(`[${this.modName}] Initialization failed: ${err.message}`);
     }
   }
 }
 
-/* export */
 module.exports = { mod: new PriceRandomizer() };
