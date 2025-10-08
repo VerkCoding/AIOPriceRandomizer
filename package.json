@@ -1,0 +1,13 @@
+{
+  "name": "AIOPriceRandomizer",
+  "version": "1.0.0",
+  "description": "Randomizes trader prices in SPT/FIKA with seeded RNG, currency conversion and safe baseline handling.",
+  "sptVersion": "~3.11.0",
+  "main": "src/mod.js",
+  "author": "HiImVerk",
+  "license": "MIT",
+  "isBundleMod": false,
+  "loadAfter": ["bluehead-AIOTrader"],
+  "order": 100,
+  "incompatibilities": []
+}

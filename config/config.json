@@ -1,0 +1,24 @@
+{
+  "enabled": true,
+  "autoDiscoverTraderIds": true,
+  "traderIds": [],
+  "minMultiplier": 0.85,
+  "maxMultiplier": 1.35,
+  "intervalSeconds": 3600,
+  "rounding": "nearest",
+  "onlyCashTrades": true,
+  "currencyTpls": {
+    "ruble": "5449016a4bdc2d6f028b456f",
+    "dollar": "5696686a4bdc2da3298b456a",
+    "eur": "569668774bdc2da2298b4568"
+  },
+  "CurrencyConversion": {
+    "enabled": true,
+    "rounding": "nearest"
+  },
+  "stickToBaseline": true,
+  "minAbsolute": 0,
+  "maxAbsolute": 0,
+  "seed": null,
+  "debug": false
+}

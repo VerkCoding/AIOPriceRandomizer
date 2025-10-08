@@ -1,0 +1,49 @@
+{
+  // Toggle mod on/off
+  "enabled": true,
+
+  // If true, auto-detect AIO/Bluehead traders by nickname.
+  "autoDiscoverTraderIds": true,
+
+  // If autoDiscoverTraderIds is false, list trader IDs here.
+  "traderIds": [
+    "6749c61aec0bff70ec6af9d6"
+  ],
+
+  // Random multiplier range. Example: 0.85 => 85% baseline
+  "minMultiplier": 0.85,
+  "maxMultiplier": 1.35,
+
+  // Seconds between re-randomize runs. 0 = run once at startup.
+  "intervalSeconds": 3600,
+
+  // Rounding: "nearest", "floor", "ceil"
+  "rounding": "nearest",
+
+  // Only touch currency barters (RUB/USD/EUR)
+  "onlyCashTrades": true,
+
+  "currencyTpls": {
+    "ruble": "5449016a4bdc2d6f028b456f",
+    "dollar": "5696686a4bdc2da3298b456a",
+    "eur": "569668774bdc2da2298b4568"
+  },
+
+  "CurrencyConversion": {
+    // Convert computed RUB price to USD/EUR token counts if trader uses those currencies
+    "enabled": true,
+    "rounding": "nearest"
+  },
+
+  // Whether to compute from authoritative baseline each cycle
+  "stickToBaseline": true,
+
+  // Absolute clamps (RUB). 0 = disabled.
+  "minAbsolute": 0,
+  "maxAbsolute": 0,
+
+  // RNG seed: set integer for reproducible results or null for derived seed
+  "seed": null,
+
+  "debug": false
+}

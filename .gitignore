@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+pnpm-lock.yaml
+# builds / caches
+dist/
+build/
+.out/
+.out-tsc/
+.cache/
+.parcel-cache/
+.turbo/
+coverage/
+# editor/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+# environment/secrets/logs
+.env
+.env.*
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+# TypeScript
+*.tsbuildinfo
