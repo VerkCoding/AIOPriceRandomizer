@@ -37,7 +37,7 @@ Edit `config/config.json` to adjust behavior:
 
 ## Requirements
 
-- **SPT-AKI 3.9.x** or compatible version
+- **SPT-AKI 3.11.x** or compatible version
 - **BlueHead's AIO Trader** (or similar Trader mods)
   - Download: https://forge.sp-tarkov.com/mod/374/blueheads-aio-trader
 
