@@ -14,8 +14,8 @@ A price randomization mod for SPT-AKI that works with BlueHead's AIO Trader and 
 
 ## Installation
 
-1. Extract the mod folder into `[SPT]/user/mods/`
-2. Verify folder structure: `user/mods/AIOPriceRandomizer/`
+1. Extract the mod folder into `./[SPT]`
+2. Verify folder structure: `./[SPT]/user/mods/AIOPriceRandomizer/`
 3. Start server - default config will be used on first run
 4. (Optional) Edit `config/config.json` to customize settings
 
